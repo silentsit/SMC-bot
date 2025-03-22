@@ -41,7 +41,7 @@ class Settings(BaseModel):
     """Application settings loaded from environment variables"""
     oanda_account: str = Field(..., env="OANDA_ACCOUNT_ID")
     oanda_token: str = Field(..., env="OANDA_API_TOKEN")
-    oanda_api_url: str = Field("https://api-fxtrade.oanda.com/v3", env="OANDA_API_URL")
+    oanda_api_url: str = Field("https://api-fxpractice.oanda.com/v3", env="OANDA_API_URL")
     oanda_environment: str = Field("practice", env="OANDA_ENVIRONMENT")
     allowed_origins: str = Field("*", env="ALLOWED_ORIGINS")
     log_level: str = Field("INFO", env="LOG_LEVEL")
@@ -50,10 +50,24 @@ class Settings(BaseModel):
     total_timeout: int = Field(45, env="TOTAL_TIMEOUT")
     max_retries: int = Field(3, env="MAX_RETRIES")
     base_delay: float = Field(1.0, env="BASE_DELAY")
-    # Updated from larger values to more reasonable default
-    base_position: int = Field(5000, env="BASE_POSITION") 
-    max_daily_loss: float = Field(0.20, env="MAX_DAILY_LOSS")  # 20% max daily loss
-    trade_24_7: bool = Field(False, env="TRADE_24_7")  # For crypto
+    base_position: int = Field(5000, env="BASE_POSITION")
+    max_daily_loss: float = Field(0.20, env="MAX_DAILY_LOSS")
+    trade_24_7: bool = Field(False, env="TRADE_24_7")
+
+    @validator('oanda_account', 'oanda_token', pre=True)
+    def validate_credentials(cls, v):
+        if not v:
+            raise ValidationError("Missing required OANDA credentials")
+        return v
+
+    @validator('oanda_api_url')
+    def validate_api_url(cls, v, values):
+        environment = values.get('oanda_environment', 'practice')
+        if environment == 'practice' and 'fxpractice' not in v:
+            raise ValidationError("Practice environment requires fxpractice API URL")
+        if environment == 'live' and 'fxtrade' not in v:
+            raise ValidationError("Live environment requires fxtrade API URL")
+        return v
 
     class Config:
         env_file = ".env"
@@ -63,9 +77,14 @@ class Settings(BaseModel):
 def load_settings() -> Settings:
     """Load settings with graceful fallback to defaults"""
     try:
-        return Settings()
+        config = Settings()
+        # Add these logging statements here
+        logger.info(f"OANDA Account: {config.oanda_account}")
+        logger.info(f"API URL: {config.oanda_api_url}")
+        logger.info(f"Environment: {config.oanda_environment}")
+        return config
     except Exception as e:
-        logging.warning(f"Error loading settings: {str(e)}. Using defaults.")
+        logger.warning(f"Error loading settings: {str(e)}. Using defaults.")
         return Settings(
             oanda_account=os.getenv("OANDA_ACCOUNT_ID", ""),
             oanda_token=os.getenv("OANDA_API_TOKEN", "")
@@ -350,6 +369,10 @@ async def get_session(force_new: bool = False) -> aiohttp.ClientSession:
     """Get or create aiohttp session with proper headers"""
     global _session
     try:
+        # Add this token check first
+        if not config.oanda_token:
+            raise TradingError("Missing OANDA API token in configuration")
+            
         if _session is None or _session.closed or force_new:
             if _session and not _session.closed:
                 await _session.close()
@@ -528,8 +551,12 @@ async def get_account_balance(account_id: str = None) -> float:
     """Fetch account balance from OANDA"""
     try:
         account_id = account_id or config.oanda_account
-        session = await get_session()
         
+        # Add this validation check
+        if account_id != config.oanda_account:
+            raise ValidationError("Account ID does not match configured account")
+        
+        session = await get_session()
         url = f"{config.oanda_api_url}/accounts/{account_id}/summary"
         
         async with session.get(url) as response:
