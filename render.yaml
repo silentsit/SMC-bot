@@ -3,7 +3,7 @@ services:
   - type: web
     name: oanda-tradingview-bot
     env: python
-    region: ohio # US East region for lower latency to trading servers
+    region: virginia # US East region for lower latency to trading servers
     plan: starter # Starter plan is recommended for trading bots to prevent spin-down
     buildCommand: pip install -r requirements.txt
     startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
@@ -23,6 +23,6 @@ services:
       - key: ALLOWED_ORIGINS
         value: "*"
       - key: MAX_DAILY_LOSS
-        value: "0.20" # 20% max daily loss limit
+        value: "0.50" # 20% max daily loss limit
       - key: TRADE_24_7
         value: "false"
