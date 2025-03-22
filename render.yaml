@@ -1,1 +1,28 @@
-
+services:
+  # Web service configuration for the OANDA trading bot
+  - type: web
+    name: oanda-tradingview-bot
+    env: python
+    region: ohio # US East region for lower latency to trading servers
+    plan: starter # Starter plan is recommended for trading bots to prevent spin-down
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: OANDA_ACCOUNT_ID
+        sync: false # Sensitive value, should be set manually
+      - key: OANDA_API_TOKEN
+        sync: false # Sensitive value, should be set manually
+      - key: OANDA_API_URL
+        value: https://api-fxtrade.oanda.com/v3 # Production API URL
+      - key: OANDA_ENVIRONMENT
+        value: practice # Change to "live" for production
+      - key: LOG_LEVEL
+        value: INFO
+      - key: ALLOWED_ORIGINS
+        value: "*"
+      - key: MAX_DAILY_LOSS
+        value: "0.20" # 20% max daily loss limit
+      - key: TRADE_24_7
+        value: "false"
