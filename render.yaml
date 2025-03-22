@@ -15,7 +15,7 @@ services:
       - key: OANDA_API_TOKEN
         sync: false # Sensitive value, should be set manually
       - key: OANDA_API_URL
-        value: https://api-fxtrade.oanda.com/v3 # Production API URL
+        value: https://api-fxpractice.oanda.com/v3 # Production API URL
       - key: OANDA_ENVIRONMENT
         value: practice # Change to "live" for production
       - key: LOG_LEVEL
