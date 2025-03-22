@@ -9,9 +9,6 @@ Date: March 21, 2025
 """
 
 import os
-print("Environment variables:")
-print(f"OANDA_ACCOUNT_ID: {os.environ.get('OANDA_ACCOUNT_ID', 'NOT SET')}")
-print(f"OANDA_API_TOKEN: {os.environ.get('OANDA_API_TOKEN', 'NOT SET')}")
 import uuid
 import asyncio
 import aiohttp
