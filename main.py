@@ -93,34 +93,37 @@ class Settings(BaseModel):
 def load_settings() -> Settings:
     """Load settings with basic logging"""
     try:
-        # Print environment variables for debugging
         import os
-        print(f"OANDA_ACCOUNT_ID from env: {os.environ.get('OANDA_ACCOUNT_ID', 'NOT SET')}")
-        print(f"OANDA_API_TOKEN from env: {os.environ.get('OANDA_API_TOKEN', 'NOT SET')}")
         
-        return Settings()
+        # Get environment variables directly
+        env_vars = {
+            "oanda_account": os.environ.get("OANDA_ACCOUNT_ID"),
+            "oanda_token": os.environ.get("OANDA_API_TOKEN"),
+            "oanda_api_url": os.environ.get("OANDA_API_URL", "https://api-fxpractice.oanda.com/v3"),
+            "oanda_environment": os.environ.get("OANDA_ENVIRONMENT", "practice"),
+            "allowed_origins": os.environ.get("ALLOWED_ORIGINS", "*"),
+            "log_level": os.environ.get("LOG_LEVEL", "INFO"),
+            "connect_timeout": int(os.environ.get("CONNECT_TIMEOUT", 10)),
+            "read_timeout": int(os.environ.get("READ_TIMEOUT", 30)),
+            "total_timeout": int(os.environ.get("TOTAL_TIMEOUT", 45)),
+            "max_retries": int(os.environ.get("MAX_RETRIES", 3)),
+            "base_delay": float(os.environ.get("BASE_DELAY", 1.0)),
+            "base_position": int(os.environ.get("BASE_POSITION", 5000)),
+            "max_daily_loss": float(os.environ.get("MAX_DAILY_LOSS", 0.20)),
+            "trade_24_7": os.environ.get("TRADE_24_7", "False").lower() == "true"
+        }
+        
+        # Validate required fields
+        if not env_vars["oanda_account"]:
+            raise ValueError("Missing OANDA_ACCOUNT_ID environment variable")
+        if not env_vars["oanda_token"]:
+            raise ValueError("Missing OANDA_API_TOKEN environment variable")
+            
+        # Create settings object
+        return Settings(**env_vars)
     except Exception as e:
         logger.critical(f"Configuration error: {str(e)}")
-        
-        # Fallback to direct environment access
-        from pydantic import create_model
-        FallbackSettings = create_model('FallbackSettings', 
-            oanda_account=(str, os.environ.get('OANDA_ACCOUNT_ID')),
-            oanda_token=(str, os.environ.get('OANDA_API_TOKEN')),
-            oanda_api_url=(str, os.environ.get('OANDA_API_URL', "https://api-fxpractice.oanda.com/v3")),
-            oanda_environment=(str, os.environ.get('OANDA_ENVIRONMENT', "practice")),
-            allowed_origins=(str, os.environ.get('ALLOWED_ORIGINS', "*")),
-            log_level=(str, os.environ.get('LOG_LEVEL', "INFO")),
-            connect_timeout=(int, int(os.environ.get('CONNECT_TIMEOUT', 10))),
-            read_timeout=(int, int(os.environ.get('READ_TIMEOUT', 30))),
-            total_timeout=(int, int(os.environ.get('TOTAL_TIMEOUT', 45))),
-            max_retries=(int, int(os.environ.get('MAX_RETRIES', 3))),
-            base_delay=(float, float(os.environ.get('BASE_DELAY', 1.0))),
-            base_position=(int, int(os.environ.get('BASE_POSITION', 5000))),
-            max_daily_loss=(float, float(os.environ.get('MAX_DAILY_LOSS', 0.20))),
-            trade_24_7=(bool, os.environ.get('TRADE_24_7', "False").lower() == "true")
-        )
-        return FallbackSettings()
+        raise
 
 config = load_settings()
 
