@@ -365,6 +365,143 @@ TV_FIELD_MAP = {
     'comment': 'comment'          # Additional comments
 }
 
+# Missing functions implementation
+def standardize_symbol(symbol: str) -> str:
+    """Convert TradingView symbols to OANDA format"""
+    # Strip out any exchange prefixes
+    symbol = re.sub(r'^[A-Z]+:', '', symbol)
+    
+    # Handle common forex symbols
+    if re.match(r'^[A-Z]{6}$', symbol):
+        base = symbol[:3]
+        quote = symbol[3:]
+        return f"{base}_{quote}"
+    
+    # Handle crypto and other symbols
+    symbol_map = {
+        "XAUUSD": "XAU_USD",
+        "BTCUSD": "BTC_USD",
+        "ETHUSD": "ETH_USD",
+        "XRPUSD": "XRP_USD",
+        "LTCUSD": "LTC_USD"
+    }
+    
+    return symbol_map.get(symbol, symbol)
+
+@handle_async_errors
+async def get_account_balance(account_id: str) -> float:
+    """Get the current account balance from OANDA"""
+    session = await get_session()
+    url = f"{config.oanda_api_url}/accounts/{account_id}/summary"
+    
+    async with session.get(url, timeout=HTTP_REQUEST_TIMEOUT) as response:
+        if response.status != 200:
+            error_text = await response.text()
+            logger.error(f"Failed to get account balance: {error_text}")
+            raise OrderError(f"Failed to get account balance: {error_text}")
+            
+        data = await response.json()
+        
+        # Extract the account balance
+        account = data.get('account', {})
+        balance = float(account.get('balance', 0))
+        currency = account.get('currency', 'USD')
+        
+        logger.info(f"Account balance: {balance} {currency}")
+        return balance
+
+@handle_async_errors
+async def calculate_trade_size(instrument: str, percentage: float, balance: float) -> Tuple[int, int]:
+    """Calculate trade size based on risk percentage and account balance"""
+    if percentage <= 0 or percentage > 100:
+        raise ValidationError("Percentage must be between 0 and 100")
+        
+    # Default leverage if instrument not in our map
+    leverage = INSTRUMENT_LEVERAGES.get(instrument, 10)
+    
+    # Calculate position size based on percentage of account
+    position_size = (balance * percentage / 100) * leverage
+    
+    # Round position size
+    if instrument.startswith("XAU"):
+        # Gold is traded in ounces, typically 0.01 units minimum
+        precision = 2
+        position_size = round(position_size, 2)
+        units = int(position_size * 100)  # Convert to OANDA units
+    elif any(crypto in instrument for crypto in ["BTC", "ETH", "XRP", "LTC"]):
+        # Crypto precision
+        precision = 8
+        position_size = round(position_size, 8)
+        units = int(position_size * 10**8)  # Convert to OANDA units
+    else:
+        # Forex
+        precision = 0
+        units = int(position_size)
+        
+    # Ensure units is at least the minimum
+    min_units = 1
+    units = max(units, min_units)
+    
+    logger.info(f"Calculated position: {units} units for {instrument} (leverage: {leverage}x)")
+    return units, precision
+
+@handle_async_errors
+async def get_open_positions(account_id: str) -> Tuple[bool, Dict[str, Any]]:
+    """Get all open positions for the account"""
+    session = await get_session()
+    url = f"{config.oanda_api_url}/accounts/{account_id}/openPositions"
+    
+    async with session.get(url, timeout=HTTP_REQUEST_TIMEOUT) as response:
+        if response.status != 200:
+            error_text = await response.text()
+            logger.error(f"Failed to get open positions: {error_text}")
+            return False, {"error": f"Failed to get open positions: {error_text}"}
+            
+        data = await response.json()
+        return True, data
+
+def translate_tradingview_signal(tv_data: Dict[str, Any]) -> Dict[str, Any]:
+    """Translate TradingView webhook format to our internal format"""
+    # Initialize with defaults
+    alert_data = {
+        "symbol": "",
+        "action": AlertAction.BUY,
+        "timeframe": "1H",
+        "orderType": OrderType.MARKET,
+        "timeInForce": TimeInForce.FOK,
+        "percentage": 15.0,
+        "account": config.oanda_account,
+        "id": str(uuid.uuid4()),
+        "comment": None
+    }
+    
+    # Map fields from TradingView
+    for tv_field, our_field in TV_FIELD_MAP.items():
+        if tv_field in tv_data:
+            alert_data[our_field] = tv_data[tv_field]
+    
+    # Handle combined 'ticker' or 'symbol'
+    if not alert_data.get('symbol') and tv_data.get('ticker'):
+        alert_data['symbol'] = tv_data['ticker']
+    
+    # Handle different action formats
+    if 'action' in tv_data:
+        action = tv_data['action'].upper()
+        if action in ['BUY', 'SELL', 'CLOSE', 'CLOSE_LONG', 'CLOSE_SHORT']:
+            alert_data['action'] = action
+        elif 'BUY' in action:
+            alert_data['action'] = 'BUY'
+        elif 'SELL' in action:
+            alert_data['action'] = 'SELL'
+        elif 'CLOSE' in action:
+            alert_data['action'] = 'CLOSE'
+    
+    # Handle strategy fields
+    if 'strategy' in tv_data:
+        alert_data['comment'] = f"Strategy: {tv_data['strategy']}"
+    
+    return alert_data
+
 @handle_async_errors
 async def execute_trade(alert_data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]:
     """Execute a trade on OANDA based on alert data"""
@@ -508,6 +645,179 @@ async def close_position(alert_data: Dict[str, Any]) -> Tuple[bool, Dict[str, An
     except Exception as e:
         logger.error(f"[{request_id}] Error closing position: {str(e)}")
         return False, {"error": str(e)}
+
+class PositionTracker:
+    """Track open positions and trading statistics"""
+    def __init__(self):
+        self.positions = {}
+        self.daily_pnl = 0.0
+        self.total_pnl = 0.0
+        self.trades_today = 0
+        self.total_trades = 0
+        self.last_reset = datetime.utcnow().date()
+        
+    async def add_position(self, instrument: str, order_data: Dict[str, Any]) -> None:
+        """Add a new position"""
+        position_id = order_data.get('id', str(uuid.uuid4()))
+        
+        self.positions[position_id] = {
+            'instrument': instrument,
+            'units': float(order_data.get('units', 0)),
+            'price': float(order_data.get('price', 0)),
+            'time': datetime.utcnow().isoformat(),
+            'order_data': order_data
+        }
+        
+        self.trades_today += 1
+        self.total_trades += 1
+        
+        # Check if we need to reset daily stats
+        current_date = datetime.utcnow().date()
+        if current_date > self.last_reset:
+            logger.info(f"Resetting daily stats for {current_date}")
+            self.daily_pnl = 0.0
+            self.trades_today = 1  # Count current trade
+            self.last_reset = current_date
+            
+    async def remove_position(self, instrument: str, close_data: Dict[str, Any]) -> None:
+        """Remove a closed position and update statistics"""
+        pnl = 0.0
+        position_id = None
+        
+        # Find position by instrument
+        for pid, pos in self.positions.items():
+            if pos['instrument'] == instrument:
+                position_id = pid
+                break
+                
+        if position_id:
+            # Extract P&L from close data
+            try:
+                if 'orderFillTransaction' in close_data:
+                    pnl = float(close_data['orderFillTransaction'].get('pl', 0))
+                elif 'longOrderFillTransaction' in close_data:
+                    pnl += float(close_data['longOrderFillTransaction'].get('pl', 0))
+                    if 'shortOrderFillTransaction' in close_data:
+                        pnl += float(close_data['shortOrderFillTransaction'].get('pl', 0))
+            except (ValueError, TypeError) as e:
+                logger.error(f"Error extracting P&L: {str(e)}")
+                
+            # Update stats
+            self.daily_pnl += pnl
+            self.total_pnl += pnl
+            
+            # Remove position
+            del self.positions[position_id]
+            
+            logger.info(f"Position {position_id} closed with P&L: {pnl}")
+    
+    async def check_daily_loss_limit(self) -> bool:
+        """Check if we've hit the daily loss limit"""
+        balance = await get_account_balance(config.oanda_account)
+        max_loss = balance * config.max_daily_loss
+        
+        if self.daily_pnl < -max_loss:
+            logger.warning(f"Daily loss limit hit: {self.daily_pnl} exceeds {max_loss}")
+            return True
+        return False
+    
+    async def get_all_positions(self) -> List[Dict[str, Any]]:
+        """Get all currently tracked positions"""
+        positions_list = []
+        
+        for position_id, position in self.positions.items():
+            positions_list.append({
+                "id": position_id,
+                "instrument": position["instrument"],
+                "units": position["units"],
+                "price": position["price"],
+                "time": position["time"]
+            })
+            
+        return positions_list
+
+class AlertHandler:
+    """Handle incoming trading alerts"""
+    def __init__(self):
+        self.position_tracker = PositionTracker()
+        self.running = False
+        self.task = None
+        
+    async def start(self):
+        """Start the alert handler background tasks"""
+        if self.running:
+            return
+            
+        self.running = True
+        self.task = asyncio.create_task(self._run_background_tasks())
+        logger.info("Alert handler started")
+        
+    async def stop(self):
+        """Stop the alert handler background tasks"""
+        if not self.running:
+            return
+            
+        self.running = False
+        if self.task:
+            self.task.cancel()
+            try:
+                await self.task
+            except asyncio.CancelledError:
+                pass
+        logger.info("Alert handler stopped")
+        
+    async def _run_background_tasks(self):
+        """Run periodic background tasks"""
+        try:
+            while self.running:
+                # Check for market hours, connection health, etc.
+                await asyncio.sleep(60)  # Check every minute
+        except asyncio.CancelledError:
+            logger.info("Background task cancelled")
+        except Exception as e:
+            logger.error(f"Error in background task: {str(e)}", exc_info=True)
+            
+    async def process_alert(self, alert_data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]:
+        """Process an incoming alert"""
+        try:
+            # Check if we've hit the daily loss limit
+            if not config.trade_24_7 and await self.position_tracker.check_daily_loss_limit():
+                return False, {"error": "Daily loss limit exceeded"}
+                
+            # Validate the alert action
+            action = alert_data.get("action", "").upper()
+            if action not in [a.value for a in AlertAction]:
+                return False, {"error": f"Invalid action: {action}"}
+                
+            # Process based on action type
+            if action in [AlertAction.BUY.value, AlertAction.SELL.value]:
+                success, result = await execute_trade(alert_data)
+                
+                if success:
+                    # Track the new position
+                    await self.position_tracker.add_position(
+                        standardize_symbol(alert_data['symbol']), result
+                    )
+                    
+                return success, result
+                
+            elif action in [AlertAction.CLOSE.value, AlertAction.CLOSE_LONG.value, AlertAction.CLOSE_SHORT.value]:
+                success, result = await close_position(alert_data)
+                
+                if success:
+                    # Update position tracking
+                    await self.position_tracker.remove_position(
+                        standardize_symbol(alert_data['symbol']), result
+                    )
+                    
+                return success, result
+                
+            else:
+                return False, {"error": f"Unsupported action: {action}"}
+                
+        except Exception as e:
+            logger.error(f"Error processing alert: {str(e)}", exc_info=True)
+            return False, {"error": str(e)}
 
 # Initialize global variables
 alert_handler = None
